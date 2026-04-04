@@ -1,0 +1,5 @@
+mcp>=1.20.0
+moneywiz-api>=1.0.6
+pytest              # runtime dep do moneywiz-api (usa pytest.approx() em modelos)
+flask>=3.0
+pdfplumber>=0.11
