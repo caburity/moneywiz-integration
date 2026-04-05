@@ -1,0 +1,429 @@
+<!DOCTYPE html>
+<html lang="pt">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>MoneyWiz Sync</title>
+  <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+<div class="container">
+
+  <h1>MoneyWiz Sync</h1>
+  <p class="subtitle">Importe extratos PDF e sincronize transações com o MoneyWiz.</p>
+
+  <!-- ── UPLOAD SECTION ── -->
+  <div id="section-upload" class="card">
+    <h2>1. Extrato(s) PDF</h2>
+
+    <div id="drop-zone" role="button" tabindex="0" aria-label="Área de upload de PDF">
+      <div class="icon">📄</div>
+      <p>Arraste um ou dois PDFs aqui<br><span class="text-muted">ou clique para selecionar</span></p>
+      <div id="file-list"></div>
+    </div>
+    <input type="file" id="file-input" accept=".pdf" multiple style="display:none">
+
+    <div id="upload-error" class="alert-error hidden"></div>
+
+    <button id="btn-analyze" disabled>
+      Analisar
+    </button>
+  </div>
+
+  <!-- ── RESULTS SECTION ── -->
+  <div id="section-results" class="hidden">
+
+    <!-- All synced message -->
+    <div id="all-synced" class="card hidden">
+      <div class="all-synced-msg">
+        ✅ Todas as transações já estão sincronizadas. Não existem novas transações.
+      </div>
+    </div>
+
+    <!-- New transactions tables -->
+    <div id="accounts-container"></div>
+
+    <div id="results-error" class="alert-error hidden"></div>
+
+    <button id="btn-sync" disabled>Sincronizar selecionadas</button>
+    <button id="btn-reset">Novo upload</button>
+  </div>
+
+  <!-- ── PROGRESS SECTION ── -->
+  <div id="section-progress" class="card hidden">
+    <h2>A sincronizar…</h2>
+    <div id="backup-msg" class="text-muted mt-8"></div>
+    <div class="progress-bar-wrap mt-16">
+      <div id="progress-bar" class="progress-bar" style="width:0%"></div>
+    </div>
+    <p id="progress-label" class="text-muted mt-8">0 de 0 transações</p>
+    <ul id="progress-list"></ul>
+  </div>
+
+  <!-- ── SUMMARY SECTION ── -->
+  <div id="section-summary" class="card hidden">
+    <h2>Resultado</h2>
+    <div id="summary-counts"></div>
+    <div id="summary-warnings" class="mt-16 text-muted hidden"></div>
+    <button id="btn-done" class="mt-16">Novo upload</button>
+  </div>
+
+</div><!-- /.container -->
+
+<!-- ── CONFIRM MODAL ── -->
+<div id="modal-overlay" class="modal-overlay" role="dialog" aria-modal="true">
+  <div class="modal">
+    <h3>Confirmar sincronização</h3>
+    <p id="modal-msg">Serão criadas X transações no MoneyWiz. Um backup será feito antes de continuar. Deseja prosseguir?</p>
+    <div class="modal-actions">
+      <button id="btn-cancel-modal" style="background:#f2f2f7;color:#3a3a3c;">Cancelar</button>
+      <button id="btn-confirm-modal" style="background:#0071e3;color:#fff;">Confirmar</button>
+    </div>
+  </div>
+</div>
+
+<script>
+// ─── State ───────────────────────────────────────────────────────────────────
+let sessionId = null;
+let allTransactions = [];   // flat list of {id, date, description, amount, type, account}
+let selectedIds = new Set();
+
+// ─── DOM refs ────────────────────────────────────────────────────────────────
+const dropZone      = document.getElementById('drop-zone');
+const fileInput     = document.getElementById('file-input');
+const fileList      = document.getElementById('file-list');
+const btnAnalyze    = document.getElementById('btn-analyze');
+const btnSync       = document.getElementById('btn-sync');
+const btnReset      = document.getElementById('btn-reset');
+const btnDone       = document.getElementById('btn-done');
+const uploadError   = document.getElementById('upload-error');
+const resultsError  = document.getElementById('results-error');
+
+const secUpload     = document.getElementById('section-upload');
+const secResults    = document.getElementById('section-results');
+const secProgress   = document.getElementById('section-progress');
+const secSummary    = document.getElementById('section-summary');
+const allSyncedMsg  = document.getElementById('all-synced');
+const accountsCont  = document.getElementById('accounts-container');
+
+const modalOverlay  = document.getElementById('modal-overlay');
+const btnCancelMod  = document.getElementById('btn-cancel-modal');
+const btnConfirmMod = document.getElementById('btn-confirm-modal');
+const modalMsg      = document.getElementById('modal-msg');
+
+const backupMsg     = document.getElementById('backup-msg');
+const progressBar   = document.getElementById('progress-bar');
+const progressLabel = document.getElementById('progress-label');
+const progressList  = document.getElementById('progress-list');
+const summaryCounts = document.getElementById('summary-counts');
+const summaryWarn   = document.getElementById('summary-warnings');
+
+// ─── File handling ───────────────────────────────────────────────────────────
+let selectedFiles = [];
+
+dropZone.addEventListener('click', () => fileInput.click());
+dropZone.addEventListener('keydown', e => { if (e.key === 'Enter' || e.key === ' ') fileInput.click(); });
+
+dropZone.addEventListener('dragover', e => { e.preventDefault(); dropZone.classList.add('drag-over'); });
+dropZone.addEventListener('dragleave', () => dropZone.classList.remove('drag-over'));
+dropZone.addEventListener('drop', e => {
+  e.preventDefault();
+  dropZone.classList.remove('drag-over');
+  handleFiles([...e.dataTransfer.files]);
+});
+
+fileInput.addEventListener('change', () => handleFiles([...fileInput.files]));
+
+function handleFiles(files) {
+  const pdfs = files.filter(f => f.name.toLowerCase().endsWith('.pdf')).slice(0, 2);
+  if (!pdfs.length) { showUploadError('Por favor selecione ficheiro(s) PDF.'); return; }
+  hideError(uploadError);
+  selectedFiles = pdfs;
+  fileList.innerHTML = pdfs.map(f => `<span>📄 ${f.name}</span>`).join('');
+  dropZone.classList.toggle('has-files', true);
+  btnAnalyze.disabled = false;
+}
+
+// ─── Analyze (Upload + Compare) ──────────────────────────────────────────────
+btnAnalyze.addEventListener('click', async () => {
+  if (!selectedFiles.length) return;
+  hideError(uploadError);
+  btnAnalyze.disabled = true;
+  btnAnalyze.innerHTML = '<span class="spinner"></span>A analisar…';
+
+  const formData = new FormData();
+  selectedFiles.forEach(f => formData.append('pdfs', f));
+
+  try {
+    const res = await fetch('/upload', { method: 'POST', body: formData });
+    const data = await res.json();
+
+    if (!res.ok) {
+      showUploadError(data.error || 'Erro desconhecido.');
+      return;
+    }
+
+    sessionId = data.session_id;
+    allTransactions = [];
+    selectedIds.clear();
+
+    if (data.all_synced) {
+      showAllSynced();
+      return;
+    }
+
+    renderResults(data);
+
+  } catch (e) {
+    showUploadError('Erro de rede: ' + e.message);
+  } finally {
+    btnAnalyze.disabled = false;
+    btnAnalyze.textContent = 'Analisar';
+  }
+});
+
+function showAllSynced() {
+  secUpload.classList.add('hidden');
+  secResults.classList.remove('hidden');
+  allSyncedMsg.classList.remove('hidden');
+  accountsCont.innerHTML = '';
+}
+
+function renderResults(data) {
+  accountsCont.innerHTML = '';
+
+  data.accounts.forEach(acct => {
+    allTransactions.push(...acct.transactions);
+
+    const card = document.createElement('div');
+    card.className = 'card';
+
+    const selectAllId = `select-all-${acct.account.replace(/\s/g, '-')}`;
+
+    card.innerHTML = `
+      <h2>${acct.account}</h2>
+      <div class="text-muted">${acct.new} nova(s) de ${acct.total_pdf !== undefined ? acct.total_pdf : '?'} no extrato</div>
+      <div class="select-all-row mt-8">
+        <input type="checkbox" id="${selectAllId}" checked>
+        <label for="${selectAllId}">Selecionar todas</label>
+      </div>
+      <table class="tx-table">
+        <thead>
+          <tr>
+            <th style="width:36px"></th>
+            <th>Data</th>
+            <th>Descrição</th>
+            <th style="text-align:right">Valor</th>
+          </tr>
+        </thead>
+        <tbody>
+          ${acct.transactions.map(tx => `
+            <tr>
+              <td><input type="checkbox" class="tx-check" data-id="${tx.id}" checked></td>
+              <td>${tx.date}</td>
+              <td>${escapeHtml(tx.description)}</td>
+              <td style="text-align:right" class="${tx.type === 'income' ? 'amount-income' : 'amount-expense'}">
+                ${tx.type === 'income' ? '+' : '-'}${tx.amount} €
+              </td>
+            </tr>
+          `).join('')}
+        </tbody>
+      </table>
+    `;
+
+    accountsCont.appendChild(card);
+
+    // Pre-select all
+    acct.transactions.forEach(tx => selectedIds.add(tx.id));
+
+    // Select-all toggle
+    const selectAllChk = card.querySelector(`#${selectAllId}`);
+    const txChecks = () => card.querySelectorAll('.tx-check');
+
+    selectAllChk.addEventListener('change', () => {
+      txChecks().forEach(chk => {
+        chk.checked = selectAllChk.checked;
+        const id = parseInt(chk.dataset.id);
+        selectAllChk.checked ? selectedIds.add(id) : selectedIds.delete(id);
+      });
+      updateSyncBtn();
+    });
+
+    card.addEventListener('change', e => {
+      if (!e.target.classList.contains('tx-check')) return;
+      const id = parseInt(e.target.dataset.id);
+      e.target.checked ? selectedIds.add(id) : selectedIds.delete(id);
+      // Update select-all state
+      const all = txChecks();
+      const checked = [...all].filter(c => c.checked);
+      selectAllChk.checked = checked.length === all.length;
+      selectAllChk.indeterminate = checked.length > 0 && checked.length < all.length;
+      updateSyncBtn();
+    });
+  });
+
+  if (data.warnings && data.warnings.length) {
+    showResultsError('Avisos: ' + data.warnings.join(' | '));
+  }
+
+  secUpload.classList.add('hidden');
+  secResults.classList.remove('hidden');
+  updateSyncBtn();
+}
+
+function updateSyncBtn() {
+  btnSync.disabled = selectedIds.size === 0;
+  btnSync.textContent = selectedIds.size > 0
+    ? `Sincronizar ${selectedIds.size} selecionada(s)`
+    : 'Sincronizar selecionadas';
+}
+
+// ─── Sync ────────────────────────────────────────────────────────────────────
+btnSync.addEventListener('click', () => {
+  const count = selectedIds.size;
+  modalMsg.textContent = `Serão criadas ${count} transação(ões) no MoneyWiz. Um backup será feito antes de continuar. Deseja prosseguir?`;
+  modalOverlay.classList.add('active');
+});
+
+btnCancelMod.addEventListener('click', () => modalOverlay.classList.remove('active'));
+modalOverlay.addEventListener('click', e => { if (e.target === modalOverlay) modalOverlay.classList.remove('active'); });
+
+btnConfirmMod.addEventListener('click', () => {
+  modalOverlay.classList.remove('active');
+  startSync();
+});
+
+async function startSync() {
+  const ids = [...selectedIds];
+  const total = ids.length;
+
+  secResults.classList.add('hidden');
+  secProgress.classList.remove('hidden');
+  progressBar.style.width = '0%';
+  progressLabel.textContent = `0 de ${total} transações`;
+  progressList.innerHTML = '';
+  backupMsg.textContent = '';
+
+  let synced = 0, unverified = 0, errors = 0;
+
+  const response = await fetch('/sync', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ session_id: sessionId, ids }),
+  });
+
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = '';
+
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    buffer += decoder.decode(value, { stream: true });
+
+    const lines = buffer.split('\n');
+    buffer = lines.pop();  // keep incomplete last line
+
+    for (const line of lines) {
+      if (!line.startsWith('data:')) continue;
+      let event;
+      try { event = JSON.parse(line.slice(5).trim()); } catch { continue; }
+
+      if (event.backup) {
+        backupMsg.textContent = '🗂 ' + event.backup;
+        continue;
+      }
+
+      if (event.done) {
+        synced = event.synced;
+        unverified = event.unverified;
+        errors = event.error;
+        showSummary(synced, unverified, errors, total);
+        continue;
+      }
+
+      // Progress event
+      const pct = Math.round((event.current / total) * 100);
+      progressBar.style.width = pct + '%';
+      progressLabel.textContent = `${event.current} de ${total} transações`;
+
+      const li = document.createElement('li');
+      const icon = event.status === 'synced' ? '✅' : event.status === 'unverified' ? '⚠️' : '❌';
+      const cls  = `status-${event.status}`;
+      li.innerHTML = `
+        <span class="${cls}">${icon}</span>
+        <span>${escapeHtml(event.description)}</span>
+        <span class="text-muted" style="margin-left:auto">${event.amount} €</span>
+      `;
+      progressList.appendChild(li);
+      progressList.scrollTop = progressList.scrollHeight;
+    }
+  }
+}
+
+function showSummary(synced, unverified, errors, total) {
+  secProgress.classList.add('hidden');
+  secSummary.classList.remove('hidden');
+
+  summaryCounts.innerHTML = `
+    <div class="count-box count-synced">
+      <div class="num">${synced}</div>
+      <div class="lbl">Sincronizadas</div>
+    </div>
+    <div class="count-box count-unverified">
+      <div class="num">${unverified}</div>
+      <div class="lbl">Não verificadas</div>
+    </div>
+    <div class="count-box count-error">
+      <div class="num">${errors}</div>
+      <div class="lbl">Com erro</div>
+    </div>
+  `;
+
+  if (unverified > 0) {
+    summaryWarn.textContent = '⚠️ Transações "não verificadas" podem ter sido criadas no MoneyWiz mas não foram confirmadas via DB. Verifique manualmente.';
+    summaryWarn.classList.remove('hidden');
+  }
+}
+
+// ─── Reset ───────────────────────────────────────────────────────────────────
+function resetAll() {
+  sessionId = null;
+  allTransactions = [];
+  selectedIds.clear();
+  selectedFiles = [];
+  fileList.innerHTML = '';
+  dropZone.classList.remove('has-files');
+  fileInput.value = '';
+  btnAnalyze.disabled = true;
+  hideError(uploadError);
+  hideError(resultsError);
+  accountsCont.innerHTML = '';
+  allSyncedMsg.classList.add('hidden');
+  summaryWarn.classList.add('hidden');
+
+  secResults.classList.add('hidden');
+  secProgress.classList.add('hidden');
+  secSummary.classList.add('hidden');
+  secUpload.classList.remove('hidden');
+}
+
+btnReset.addEventListener('click', resetAll);
+btnDone.addEventListener('click', resetAll);
+
+// ─── Helpers ─────────────────────────────────────────────────────────────────
+function escapeHtml(str) {
+  return str.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+}
+function showUploadError(msg) {
+  uploadError.textContent = msg;
+  uploadError.classList.remove('hidden');
+}
+function showResultsError(msg) {
+  resultsError.textContent = msg;
+  resultsError.classList.remove('hidden');
+}
+function hideError(el) { el.classList.add('hidden'); }
+</script>
+</body>
+</html>
