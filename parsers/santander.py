@@ -16,26 +16,21 @@ from decimal import Decimal, InvalidOperation
 
 import pdfplumber
 
-_SECTION_ANCHOR = "Listagem Movimentos"
+_SECTION_ANCHOR = "ListagemMovimentos"
 _ACCOUNT_NAME = "Cartão123"
 
-# Transactions starting with these strings are ignored
-_IGNORE_PREFIXES = (
-    "PAG.TRANS.BANCARIA",
-    "COMISSAO DISPONIBILIZACAO",
-    "BONIF. COMISS DISPONIBILIZACAO",
-)
 
-# Prefix to strip from description: "COMPRA TPA*2681 " or "COMPRA ESTRANG*1881 " etc.
-_CARD_PREFIX_RE = re.compile(r"COMPRA\s+(TPA|ESTRANG)\*\d{4}\s+")
+# Prefix to strip from description: "COMPRATPA*2681" or "COMPRAESTRANG*1881" etc.
+# pdfplumber extracts text without spaces between columns
+_CARD_PREFIX_RE = re.compile(r"COMPRA(TPA|ESTRANG)\*\d{4}")
 
 # Transaction start: 9-digit movement number + space + DD-MM-YYYY
 # e.g. "602130001  11-02-2026  COMPRA TPA*2681 ..."
 _TX_START_RE = re.compile(r"^\d{6,12}\s+(\d{2})-(\d{2})-(\d{4})\s+(.*)")
 
-# Amount at end of line: optional D/C indicator + amount with comma + EUR
-# e.g. "D  10,99 EUR" or "C  150,00 EUR"
-_AMOUNT_RE = re.compile(r"\b(D|C)\s+([\d\.]+,\d{2})\s+EUR\s*$")
+# Amount at end of line: PENDENTE + D/C + amount with comma + EUR (no space before EUR)
+# pdfplumber extracts e.g. "PENDENTE D 41,89EUR"
+_AMOUNT_RE = re.compile(r"PENDENTE\s+(D|C)\s+([\d\.]+,\d{2})EUR\s*$")
 
 
 def parse(pdf_path: str) -> list[dict]:
@@ -95,18 +90,21 @@ def _extract_transactions(text: str) -> list[dict]:
             rest = m.group(4).strip()
             current = {
                 "date": date(year, month, day),
-                "raw_desc": rest,
+                # main_line: first line which contains the amount at the end
+                # extra: continuation lines (part of description, no amount)
+                "main_line": rest,
+                "extra": [],
             }
         elif current is not None:
             # Continuation line — append to description
             # Stop on typical table headers or footers
-            if re.match(r"^(Movimento|Data|Descricao|Estado|Montante|Saldo|Total|Pagina)", line_stripped, re.IGNORECASE):
+            if re.match(r"^(Movimento|Data|Descri|Estado|Montante|Saldo|Total|Pagina|©)", line_stripped, re.IGNORECASE):
                 result = _finalise(current)
                 if result:
                     transactions.append(result)
                 current = None
             else:
-                current["raw_desc"] = current["raw_desc"] + " " + line_stripped
+                current["extra"].append(line_stripped)
 
     # Commit last transaction
     if current is not None:
@@ -118,11 +116,12 @@ def _extract_transactions(text: str) -> list[dict]:
 
 
 def _finalise(tx: dict) -> dict | None:
-    """Extract amount/type from raw_desc, clean description, apply filters."""
-    raw = tx["raw_desc"]
+    """Extract amount/type from main_line, build description from main_line + extra."""
+    main_line = tx["main_line"]
+    extra = tx.get("extra", [])
 
-    # Extract amount and D/C type
-    amount_m = _AMOUNT_RE.search(raw)
+    # Amount is always on the main line (first line of transaction)
+    amount_m = _AMOUNT_RE.search(main_line)
     if not amount_m:
         return None
 
@@ -135,17 +134,16 @@ def _finalise(tx: dict) -> dict | None:
     except InvalidOperation:
         return None
 
-    # Remove amount+type suffix from description text
-    description = raw[:amount_m.start()].strip()
+    # Description: part before amount on main line + continuation lines
+    description = main_line[:amount_m.start()].strip()
+    if extra:
+        description = description + " " + " ".join(extra)
+    description = description.strip()
 
-    # Remove "EXTRACTADO" status word if present
-    description = re.sub(r"\bEXTRACTADO\b", "", description).strip()
+    # Remove "EXTRACTADO" or "PENDENTE" status words if present
+    description = re.sub(r"\b(EXTRACTADO|PENDENTE)\b", "", description).strip()
 
-    # Check ignore list before stripping prefix
-    if any(description.startswith(p) for p in _IGNORE_PREFIXES):
-        return None
-
-    # Strip card prefix: "COMPRA TPA*2681 " etc.
+    # Strip card prefix: "COMPRATPA*2681" etc.
     description = _CARD_PREFIX_RE.sub("", description).strip()
 
     # Skip if description is empty after cleaning
