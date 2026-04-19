@@ -24,13 +24,13 @@ _ACCOUNT_NAME = "Cartão123"
 # pdfplumber extracts text without spaces between columns
 _CARD_PREFIX_RE = re.compile(r"COMPRA(TPA|ESTRANG)\*\d{4}")
 
-# Transaction start: 9-digit movement number + space + DD-MM-YYYY
-# e.g. "602130001  11-02-2026  COMPRA TPA*2681 ..."
-_TX_START_RE = re.compile(r"^\d{6,12}\s+(\d{2})-(\d{2})-(\d{4})\s+(.*)")
+# Transaction start: movement number (1+ digits) + space + DD-MM-YYYY
+# Note: PAG.TRANS.BANCARIA may have movement number "1" (single digit)
+_TX_START_RE = re.compile(r"^\d+\s+(\d{2})-(\d{2})-(\d{4})\s+(.*)")
 
-# Amount at end of line: PENDENTE + D/C + amount with comma + EUR (no space before EUR)
-# pdfplumber extracts e.g. "PENDENTE D 41,89EUR"
-_AMOUNT_RE = re.compile(r"PENDENTE\s+(D|C)\s+([\d\.]+,\d{2})EUR\s*$")
+# Amount at end of line: PENDENTE/EXTRACTADO + D/C + amount with comma + EUR (no space before EUR)
+# pdfplumber extracts e.g. "PENDENTE D 41,89EUR" or "EXTRACTADO D 5,71EUR"
+_AMOUNT_RE = re.compile(r"(?:PENDENTE|EXTRACTADO)\s+(D|C)\s+([\d\.]+,\d{2})EUR\s*$")
 
 
 def parse(pdf_path: str) -> list[dict]:
