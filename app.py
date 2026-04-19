@@ -197,7 +197,10 @@ def sync():
 # ---------------------------------------------------------------------------
 
 def _parse_pdf(path: str) -> list[dict]:
-    """Auto-detect bank and parse PDF. Tries Millennium first, then Santander."""
+    """Auto-detect format and parse. CSV → Millennium export. PDF → try Millennium then Santander."""
+    if path.lower().endswith(".csv"):
+        return millennium.parse_csv(path)
+
     try:
         return millennium.parse(path)
     except ValueError:

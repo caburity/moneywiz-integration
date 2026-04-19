@@ -10,18 +10,18 @@
 <div class="container">
 
   <h1>MoneyWiz Sync</h1>
-  <p class="subtitle">Importe extratos PDF e sincronize transações com o MoneyWiz.</p>
+  <p class="subtitle">Importe extratos (PDF ou CSV) e sincronize transações com o MoneyWiz.</p>
 
   <!-- ── UPLOAD SECTION ── -->
   <div id="section-upload" class="card">
-    <h2>1. Extrato(s) PDF</h2>
+    <h2>1. Extrato(s)</h2>
 
-    <div id="drop-zone" role="button" tabindex="0" aria-label="Área de upload de PDF">
+    <div id="drop-zone" role="button" tabindex="0" aria-label="Área de upload de extrato">
       <div class="icon">📄</div>
-      <p>Arraste um ou dois PDFs aqui<br><span class="text-muted">ou clique para selecionar</span></p>
+      <p>Arraste ficheiros PDF ou CSV aqui<br><span class="text-muted">ou clique para selecionar</span></p>
       <div id="file-list"></div>
     </div>
-    <input type="file" id="file-input" accept=".pdf" multiple style="display:none">
+    <input type="file" id="file-input" accept=".pdf,.csv" multiple style="display:none">
 
     <div id="upload-error" class="alert-error hidden"></div>
 
@@ -135,11 +135,17 @@ dropZone.addEventListener('drop', e => {
 fileInput.addEventListener('change', () => handleFiles([...fileInput.files]));
 
 function handleFiles(files) {
-  const pdfs = files.filter(f => f.name.toLowerCase().endsWith('.pdf')).slice(0, 2);
-  if (!pdfs.length) { showUploadError('Por favor selecione ficheiro(s) PDF.'); return; }
+  const accepted = files.filter(f => {
+    const n = f.name.toLowerCase();
+    return n.endsWith('.pdf') || n.endsWith('.csv');
+  }).slice(0, 2);
+  if (!accepted.length) { showUploadError('Por favor selecione ficheiro(s) PDF ou CSV.'); return; }
   hideError(uploadError);
-  selectedFiles = pdfs;
-  fileList.innerHTML = pdfs.map(f => `<span>📄 ${f.name}</span>`).join('');
+  selectedFiles = accepted;
+  fileList.innerHTML = accepted.map(f => {
+    const icon = f.name.toLowerCase().endsWith('.csv') ? '📊' : '📄';
+    return `<span>${icon} ${f.name}</span>`;
+  }).join('');
   dropZone.classList.toggle('has-files', true);
   btnAnalyze.disabled = false;
 }
